@@ -1,469 +1,331 @@
 import streamlit as st
 import sys
 import os
-import pandas as pd
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+from scipy.optimize import minimize_scalar
+import yfinance as yf
+import warnings
+warnings.filterwarnings('ignore')
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-st.set_page_config(page_title="IO/PO Strips Analysis", layout="wide")
+st.set_page_config(page_title="Term Structure", layout="wide")
 
-st.title("📊 IO/PO Strips Analysis")
-st.markdown("Analyze Interest-Only and Principal-Only strips from mortgage pools")
+st.title("🔮 Term Structure of Interest Rates (Yield Curve)")
+st.markdown("""
+Learn how interest rates vary with time to maturity - a fundamental concept in fixed income.
+""")
 
-# Payment frequency mapping
-frequency_map = {
-    "Monthly (12x/year)": 12,
-    "Bi-Weekly (26x/year)": 26,
-    "Weekly (52x/year)": 52,
-    "Quarterly (4x/year)": 4,
-    "Semi-Annual (2x/year)": 2,
-    "Annual (1x/year)": 1
-}
-
-# Inputs
-st.subheader("📋 Loan Parameters")
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    principal = st.number_input("Loan Amount ($)", 50000, 1000000, 300000, 25000)
+# ========== EXPLANATION SECTION ==========
+with st.expander("📖 What is Term Structure? Click to learn", expanded=True):
+    st.markdown("""
+    ### Simple Explanation
     
-with col2:
-    annual_rate = st.number_input("Annual Interest Rate (%)", 1.0, 15.0, 5.0, 0.125) / 100
+    **Term Structure** = How interest rates change with different time horizons.
     
-with col3:
-    years = st.number_input("Loan Term (years)", 1, 40, 30, 1)
+    ### Real-World Example:
+    
+    | Investment | Time Horizon | Interest Rate |
+    |------------|--------------|---------------|
+    | 3-month Treasury bill | 3 months | 4.5% |
+    | 2-year Treasury note | 2 years | 4.8% |
+    | 10-year Treasury bond | 10 years | 5.2% |
+    | 30-year Treasury bond | 30 years | 5.5% |
+    
+    When you plot these points, you get the **Yield Curve**.
+    
+    ### Three Typical Shapes:
+    
+    | Shape | What it means | Economic Signal |
+    |-------|---------------|-----------------|
+    | 📈 **Normal (Upward Sloping)** | Long-term rates > Short-term rates | Economic growth expected |
+    | 📉 **Inverted (Downward Sloping)** | Short-term rates > Long-term rates | Recession may be coming |
+    | ➡️ **Flat** | Rates are similar across maturities | Economic uncertainty |
+    
+    ### Why This Matters:
+    - **Banks** borrow short, lend long → profit from normal curve
+    - **Investors** use curve to decide bond maturities
+    - **Central Banks** monitor curve for policy signals
+    """)
 
-# Payment frequency selection
-st.subheader("📅 Payment Schedule")
-frequency_option = st.selectbox(
-    "Payment Frequency",
-    list(frequency_map.keys()),
+# ========== METHOD SELECTION ==========
+st.subheader("📊 Choose Your Method")
+
+method = st.radio(
+    "Select how you want to estimate the term structure:",
+    ["📈 Method 1: Use Real Treasury Data (Yahoo Finance)", 
+     "📝 Method 2: Enter Your Own Bond Data",
+     "📐 Method 3: Nelson-Siegel Model (Smooth Curve)"],
     index=0
 )
 
-freq_per_year = frequency_map[frequency_option]
-st.caption(f"💡 {frequency_option} = {freq_per_year} payments per year")
-
-# Advanced options
-with st.expander("⚙️ Advanced Options"):
-    col_a1, col_a2 = st.columns(2)
-    with col_a1:
-        extra_payment = st.number_input("Extra Payment Amount ($)", 0, 5000, 0, 50)
-        st.caption("Applied to principal each payment")
-    with col_a2:
-        show_years = st.slider("Show amortization for first (years)", 1, 10, 5)
-
-def calculate_payment(principal, annual_rate, years, freq_per_year, extra_payment=0):
-    """Calculate periodic payment with optional extra payment"""
-    periods = years * freq_per_year
-    periodic_rate = annual_rate / freq_per_year
+# ========== METHOD 1: REAL DATA ==========
+if method == "📈 Method 1: Use Real Treasury Data (Yahoo Finance)":
+    st.markdown("### Downloading Real US Treasury Yields")
+    st.info("📡 Fetching current US Treasury yield curve data...")
     
-    if periodic_rate == 0:
-        base_payment = principal / periods
+    # Treasury ETF tickers as proxies
+    treasury_data = {
+        '1-3 months': 'BIL',
+        '1-3 years': 'SHY',
+        '3-7 years': 'IEI',
+        '7-10 years': 'IEF',
+        '10-20 years': 'TLH',
+        '20+ years': 'TLT'
+    }
+    
+    maturities = {
+        'BIL': 0.25,
+        'SHY': 2.0,
+        'IEI': 5.0,
+        'IEF': 8.5,
+        'TLH': 15.0,
+        'TLT': 25.0
+    }
+    
+    try:
+        with st.spinner("Fetching real-time treasury data..."):
+            yields_data = {}
+            for name, ticker in treasury_data.items():
+                try:
+                    etf = yf.Ticker(ticker)
+                    info = etf.info
+                    sec_yield = info.get('thirtyDayAverageYield', None)
+                    if sec_yield:
+                        yields_data[name] = sec_yield * 100
+                    else:
+                        dividend_yield = info.get('dividendYield', 0.04)
+                        yields_data[name] = dividend_yield * 100
+                except:
+                    fallback = {
+                        '1-3 months': 5.25,
+                        '1-3 years': 4.75,
+                        '3-7 years': 4.50,
+                        '7-10 years': 4.40,
+                        '10-20 years': 4.45,
+                        '20+ years': 4.50
+                    }
+                    yields_data[name] = fallback.get(name, 4.5)
+            
+            plot_data = pd.DataFrame({
+                'Maturity (Years)': [maturities[t] for t in treasury_data.values()],
+                'Yield (%)': [yields_data[name] for name in treasury_data.keys()],
+                'Treasury': list(treasury_data.keys())
+            })
+            plot_data = plot_data.sort_values('Maturity (Years)')
+            
+            st.success("✅ Data retrieved successfully!")
+            
+    except Exception as e:
+        st.warning(f"Could not fetch live data. Using sample data.")
+        plot_data = pd.DataFrame({
+            'Maturity (Years)': [0.25, 1, 2, 3, 5, 7, 10, 20, 30],
+            'Yield (%)': [5.25, 5.00, 4.75, 4.65, 4.55, 4.50, 4.45, 4.50, 4.55],
+            'Treasury': ['3mo', '1yr', '2yr', '3yr', '5yr', '7yr', '10yr', '20yr', '30yr']
+        })
+    
+    # Display yield curve
+    st.subheader("📈 Current US Treasury Yield Curve")
+    
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=plot_data['Maturity (Years)'], 
+        y=plot_data['Yield (%)'],
+        mode='lines+markers',
+        name='Yield Curve',
+        line=dict(color='blue', width=3),
+        marker=dict(size=10, color='red')
+    ))
+    
+    fig.update_layout(
+        title='US Treasury Yield Curve',
+        xaxis_title='Time to Maturity (Years)',
+        yaxis_title='Yield (%)',
+        hovermode='x unified'
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Curve shape interpretation
+    short_term = plot_data[plot_data['Maturity (Years)'] <= 2]['Yield (%)'].mean()
+    long_term = plot_data[plot_data['Maturity (Years)'] >= 10]['Yield (%)'].mean()
+    
+    if long_term > short_term:
+        curve_shape = "📈 Normal (Upward Sloping)"
+        interpretation = "Markets expect economic growth and higher future inflation."
+    elif long_term < short_term:
+        curve_shape = "📉 Inverted (Downward Sloping)"
+        interpretation = "⚠️ Potential recession signal. Markets expect rate cuts."
     else:
-        base_payment = principal * (periodic_rate * (1 + periodic_rate) ** periods) / ((1 + periodic_rate) ** periods - 1)
+        curve_shape = "➡️ Flat"
+        interpretation = "Economic uncertainty. Markets unsure about future direction."
     
-    total_payment = base_payment + extra_payment
-    return base_payment, total_payment, periods, periodic_rate
+    col_i1, col_i2 = st.columns(2)
+    with col_i1:
+        st.metric("Short-term Rate (≤2yr)", f"{short_term:.2f}%")
+    with col_i2:
+        st.metric("Long-term Rate (≥10yr)", f"{long_term:.2f}%")
+    
+    st.info(f"**Curve Shape:** {curve_shape}\n\n**Interpretation:** {interpretation}")
 
-def amortization_schedule(principal, annual_rate, years, freq_per_year, extra_payment=0):
-    """Generate full amortization schedule with frequency options"""
-    base_payment, total_payment, periods, periodic_rate = calculate_payment(
-        principal, annual_rate, years, freq_per_year, extra_payment
+# ========== METHOD 2: USER INPUT ==========
+elif method == "📝 Method 2: Enter Your Own Bond Data":
+    st.markdown("### Enter Bond Data to Bootstrap the Yield Curve")
+    st.caption("💡 Enter the price and coupon for bonds of different maturities")
+    
+    default_bonds = pd.DataFrame({
+        'Maturity (years)': [0.5, 1, 2, 3, 5, 7, 10],
+        'Coupon Rate (%)': [0.0, 0.0, 4.0, 4.0, 3.5, 4.0, 4.5],
+        'Bond Price ($)': [98.5, 96.0, 101.5, 102.0, 100.5, 103.0, 105.0]
+    })
+    
+    edited_bonds = st.data_editor(
+        default_bonds,
+        use_container_width=True,
+        num_rows="dynamic",
+        column_config={
+            "Maturity (years)": st.column_config.NumberColumn("Maturity (years)", min_value=0.1, max_value=50.0),
+            "Coupon Rate (%)": st.column_config.NumberColumn("Coupon Rate (%)", min_value=0.0, max_value=20.0),
+            "Bond Price ($)": st.column_config.NumberColumn("Bond Price ($)", min_value=50.0, max_value=150.0)
+        }
     )
     
-    schedule = []
-    balance = principal
-    payment_num = 1
-    total_interest_paid = 0
-    total_principal_paid = 0
+    if len(edited_bonds) < 2:
+        st.warning("⚠️ Please enter at least 2 bonds to estimate the curve")
+        st.stop()
     
-    while balance > 0 and payment_num <= periods:
-        interest = balance * periodic_rate
-        principal_paid = min(total_payment - interest, balance)
+    # Bootstrap function
+    def bootstrap_curve(bond_df):
+        zero_rates = []
         
-        if extra_payment > 0:
-            principal_paid = min(base_payment - interest + extra_payment, balance)
+        for i, row in bond_df.iterrows():
+            maturity = row['Maturity (years)']
+            coupon = row['Coupon Rate (%)'] / 100
+            price = row['Bond Price ($)']
+            
+            def objective(rate):
+                pv = 0
+                n_periods = int(maturity * 2)
+                for t in range(1, n_periods + 1):
+                    if t < n_periods:
+                        pv += (coupon * 100 / 2) * np.exp(-rate * (t/2))
+                    else:
+                        pv += (coupon * 100 / 2 + 100) * np.exp(-rate * (t/2))
+                return abs(pv - price)
+            
+            result = minimize_scalar(objective, bounds=(0, 0.20), method='bounded')
+            zero_rates.append({
+                'Maturity': maturity,
+                'Zero Rate (%)': result.x * 100
+            })
         
-        balance -= principal_paid
-        
-        year = (payment_num - 1) // freq_per_year + 1
-        period_in_year = (payment_num - 1) % freq_per_year + 1
-        
-        schedule.append({
-            'Payment #': payment_num,
-            'Year': year,
-            'Period': period_in_year,
-            'Payment': total_payment,
-            'Interest': interest,
-            'Principal': principal_paid,
-            'Balance': max(0, balance),
-            'Cumulative Interest': total_interest_paid + interest,
-            'Cumulative Principal': total_principal_paid + principal_paid
-        })
-        
-        total_interest_paid += interest
-        total_principal_paid += principal_paid
-        payment_num += 1
-        
-        if balance <= 0:
-            break
+        return pd.DataFrame(zero_rates)
     
-    return pd.DataFrame(schedule), base_payment, total_payment, total_interest_paid, total_principal_paid
-
-def calculate_io_po_strips(schedule, annual_rate, freq_per_year):
-    """Calculate present value of IO and PO strips"""
-    periodic_rate = annual_rate / freq_per_year
-    io_value = 0
-    po_value = 0
+    # Calculate curve
+    zero_curve = bootstrap_curve(edited_bonds)
     
-    for _, row in schedule.iterrows():
-        discount_factor = 1 / (1 + periodic_rate) ** row['Payment #']
-        io_value += row['Interest'] * discount_factor
-        po_value += row['Principal'] * discount_factor
+    # Display results
+    st.subheader("📈 Bootstrapped Zero-Coupon Yield Curve")
     
-    return io_value, po_value
-
-# Calculate
-schedule, base_payment, total_payment, total_interest, total_principal = amortization_schedule(
-    principal, annual_rate, years, freq_per_year, extra_payment
-)
-
-io_value, po_value = calculate_io_po_strips(schedule, annual_rate, freq_per_year)
-
-# Display summary
-st.subheader("📊 Loan Summary")
-
-col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-
-with col_s1:
-    st.metric("Periodic Payment", f"${total_payment:,.2f}")
-    st.caption(f"({frequency_option})")
-
-with col_s2:
-    total_payments = total_payment * len(schedule)
-    st.metric("Total Payments", f"${total_payments:,.2f}")
-
-with col_s3:
-    st.metric("Total Interest", f"${total_interest:,.2f}")
-
-with col_s4:
-    actual_term_years = len(schedule) / freq_per_year
-    st.metric("Actual Term", f"{actual_term_years:.1f} years")
-    if extra_payment > 0:
-        original_term_years = years
-        years_saved = original_term_years - actual_term_years
-        st.caption(f"💡 Saved {years_saved:.1f} years")
-
-# Payment breakdown visualization
-st.subheader("💰 Payment Breakdown Over Time")
-
-show_periods = min(show_years * freq_per_year, len(schedule))
-schedule_subset = schedule.head(show_periods)
-schedule_subset['Year_Group'] = schedule_subset['Year']
-yearly_summary = schedule_subset.groupby('Year_Group').agg({
-    'Interest': 'sum',
-    'Principal': 'sum',
-    'Payment': 'first'
-}).reset_index()
-
-fig = go.Figure()
-fig.add_trace(go.Bar(x=yearly_summary['Year_Group'], y=yearly_summary['Interest'], 
-                     name='Interest', marker_color='#ff7f0e'))
-fig.add_trace(go.Bar(x=yearly_summary['Year_Group'], y=yearly_summary['Principal'], 
-                     name='Principal', marker_color='#2ca02c'))
-fig.update_layout(title=f'Payment Breakdown (First {show_years} years)',
-                  xaxis_title='Year',
-                  yaxis_title='Amount ($)',
-                  barmode='stack')
-st.plotly_chart(fig, use_container_width=True)
-
-# Loan balance over time
-st.subheader("📉 Loan Balance Over Time")
-
-balance_over_time = schedule[['Payment #', 'Year', 'Balance']].copy()
-balance_over_time = balance_over_time[balance_over_time['Payment #'] % max(1, freq_per_year // 12) == 0]
-
-fig2 = go.Figure()
-fig2.add_trace(go.Scatter(x=balance_over_time['Year'], y=balance_over_time['Balance'], 
-                          mode='lines', name='Remaining Balance', 
-                          line=dict(color='blue', width=2)))
-fig2.add_hline(y=principal/2, line_dash="dash", line_color="green", 
-               annotation_text="Half Paid")
-fig2.update_layout(title='Loan Balance Amortization',
-                   xaxis_title='Year',
-                   yaxis_title='Balance ($)')
-st.plotly_chart(fig2, use_container_width=True)
-
-# Amortization schedule (first X periods)
-st.subheader(f"📅 Amortization Schedule (First {min(12, len(schedule))} {frequency_option.lower()})")
-
-display_cols = ['Payment #', 'Year', 'Period', 'Payment', 'Interest', 'Principal', 'Balance']
-display_schedule = schedule[display_cols].head(12).copy()
-
-for col in ['Payment', 'Interest', 'Principal', 'Balance']:
-    display_schedule[col] = display_schedule[col].apply(lambda x: f"${x:,.2f}")
-
-st.dataframe(display_schedule, use_container_width=True)
-
-if len(schedule) > 12:
-    st.caption(f"Showing first 12 of {len(schedule)} total payments")
-
-# IO/PO Strips Analysis
-st.subheader("📊 IO/PO Strip Analysis")
-
-col_io1, col_io2 = st.columns(2)
-
-with col_io1:
-    st.metric("Interest-Only (IO) Strip Value", f"${io_value:,.2f}")
-    st.caption("Present value of all future interest payments")
-
-with col_io2:
-    st.metric("Principal-Only (PO) Strip Value", f"${po_value:,.2f}")
-    st.caption("Present value of all future principal payments")
-
-# IO/PO sensitivity
-st.subheader("📈 IO/PO Interest Rate Sensitivity")
-
-rate_range = np.linspace(annual_rate * 0.5, annual_rate * 1.5, 30)
-io_values = []
-po_values = []
-
-for r in rate_range:
-    temp_schedule, _, _, _, _ = amortization_schedule(principal, r, years, freq_per_year, extra_payment)
-    temp_io, temp_po = calculate_io_po_strips(temp_schedule, r, freq_per_year)
-    io_values.append(temp_io)
-    po_values.append(temp_po)
-
-fig3 = go.Figure()
-fig3.add_trace(go.Scatter(x=rate_range*100, y=io_values, name='IO Strip', mode='lines', line=dict(color='orange', width=2)))
-fig3.add_trace(go.Scatter(x=rate_range*100, y=po_values, name='PO Strip', mode='lines', line=dict(color='green', width=2)))
-fig3.add_vline(x=annual_rate*100, line_dash="dash", line_color="gray", 
-               annotation_text="Current Rate")
-fig3.update_layout(title='IO/PO Strip Values vs Interest Rate',
-                   xaxis_title='Interest Rate (%)',
-                   yaxis_title='Strip Value ($)')
-st.plotly_chart(fig3, use_container_width=True)
-
-# ========== COMPREHENSIVE INTERPRETATION SECTION ==========
-st.subheader("📖 How to Interpret This Graph")
-
-with st.expander("🎓 Click to understand what IO/PO strips mean (Finance explanation)", expanded=False):
-    
-    st.markdown("""
-    ### 🔷 What are IO and PO Strips?
-    
-    When you split a mortgage into two separate securities:
-    
-    - **🟠 IO Strip (Interest-Only):** Represents ONLY the interest payments
-    - **🟢 PO Strip (Principal-Only):** Represents ONLY the principal repayments
-    
-    ---
-    
-    ### 📈 What the Graph Shows
-    
-    The graph above shows how the **value of IO and PO strips changes** when interest rates change.
-    
-    ---
-    
-    ### 🟠 IO Strip Behavior (Orange Line)
-    
-    **IO value INCREASES when interest rates RISE**
-    **IO value DECREASES when interest rates FALL**
-    
-    **Why?**
-    - When rates rise → borrowers are less likely to refinance
-    - The loan lasts longer → you collect interest payments for longer
-    - Therefore IO becomes MORE valuable
-    
-    ✅ **IO = Positively related to interest rates**
-    
-    ---
-    
-    ### 🟢 PO Strip Behavior (Green Line)
-    
-    **PO value DECREASES when interest rates RISE**
-    **PO value INCREASES when interest rates FALL**
-    
-    **Why?**
-    - When rates fall → borrowers refinance early
-    - You get your principal back FASTER
-    - Therefore PO becomes MORE valuable when rates drop
-    
-    ✅ **PO = Negatively related to interest rates**
-    
-    ---
-    
-    ### 🔄 They Behave Like Opposites
-    
-    | Interest Rates | IO Value | PO Value |
-    |---------------|----------|----------|
-    | Go Up ⬆ | Goes Up ⬆ | Goes Down ⬇ |
-    | Go Down ⬇ | Goes Down ⬇ | Goes Up ⬆ |
-    
-    ---
-    
-    ### 💡 Why This Matters for Investors
-    
-    - **Buy IO strips** when you expect interest rates to **rise or stay stable**
-    - **Buy PO strips** when you expect interest rates to **fall**
-    - **Hedge:** Combine both to create duration-neutral positions
-    
-    ---
-    
-    ### 📚 Key Financial Concept: Prepayment Risk
-    
-    This graph illustrates **prepayment risk**:
-    - Homeowners refinance when rates drop
-    - This hurts IO investors (interest stops early)
-    - This helps PO investors (get money back faster)
-    
-    **IO investors want rates to stay high or rise**
-    **PO investors want rates to drop**
-    """)
-
-with st.expander("🏛️ Relevance to Financial Regulation", expanded=False):
-    st.markdown("""
-    ### Why Regulators Care About IO/PO Strips
-    
-    **1. Prepayment Modeling Risk**
-    - Banks must model prepayment behavior for capital requirements
-    - Incorrect prepayment assumptions → undercapitalization
-    - Regulators require **PSA (Public Securities Association)** prepayment models
-    
-    **2. Interest Rate Risk**
-    - IO strips have **negative convexity** (price drops more than it rises)
-    - Traditional duration models FAIL for IO strips
-    - Regulators require specialized risk models for MBS
-    
-    **3. 2008 Financial Crisis Lesson**
-    - Complex MBS with IO/PO tranches hid true risk
-    - Investors didn't understand prepayment sensitivity
-    - Led to massive unexpected losses during the crisis
-    
-    **4. Basel III Requirements**
-    - Banks must hold additional capital for negative convexity instruments
-    - Stress testing must include prepayment scenarios
-    - Liquidity coverage ratios (LCR) account for MBS behavior
-    
-    **5. Regulatory Arbitrage Warning**
-    - Banks used IO/PO strips to reduce regulatory capital
-    - Hidden risk led to stricter rules post-2008
-    - Now: Full risk disclosure required
-    
-    **Source:** Coval, Jurek & Stafford (2009) - "The Economics of Structured Finance"
-    """)
-
-with st.expander("📊 Trading Strategies & Real-World Application", expanded=False):
-    st.markdown("""
-    ### How Professional Investors Trade IO/PO Strips
-    
-    **🟠 IO Strip Trading Strategy:**
-    - **Buy IO when:** Expecting rising rates or stable prepayments
-    - **Sell IO when:** Expecting falling rates or refinancing wave
-    - **Typical buyers:** Insurance companies, pension funds (liability matching)
-    - **Risk:** IO can lose 50%+ value in falling rate environments
-    
-    **🟢 PO Strip Trading Strategy:**
-    - **Buy PO when:** Expecting falling rates (refinancing play)
-    - **Sell PO when:** Expecting rising rates
-    - **Typical buyers:** Hedge funds, opportunistic investors
-    - **Risk:** PO underperforms when rates rise or prepayments slow
-    
-    **🏦 Hedging Application:**
-    
-    | Risk Exposure | Hedge Strategy |
-    |---------------|----------------|
-    | Bank holds mortgages | Buy PO strips (gains when rates fall) |
-    | Servicer wants stable income | Buy IO strips (steady interest income) |
-    | Falling rate expectation | Long PO / Short IO |
-    | Rising rate expectation | Long IO / Short PO |
-    
-    **⚠️ Key Risk Warning:**
-    - IO strips can lose value rapidly in falling rate environments
-    - PO strips require accurate prepayment modeling
-    - Both require sophisticated risk management
-    - NOT suitable for retail investors
-    """)
-
-# Comparison: Different payment frequencies
-st.subheader("📊 Payment Frequency Comparison")
-
-if st.checkbox("Compare different payment frequencies"):
-    freq_comparison = []
-    for freq_name, freq_num in frequency_map.items():
-        _, base_pmt, total_pmt, interest_total, _ = amortization_schedule(
-            principal, annual_rate, years, freq_num, 0
-        )
-        periods = years * freq_num
-        freq_comparison.append({
-            'Frequency': freq_name,
-            'Payment Amount': f"${base_pmt:.2f}",
-            'Total Interest': f"${interest_total:,.2f}",
-            'Total Payments': f"${base_pmt * periods:,.2f}",
-            '# of Payments': periods
-        })
-    
-    st.dataframe(pd.DataFrame(freq_comparison), use_container_width=True)
-    
-    st.info("""
-    **Key Insight:** More frequent payments (weekly/bi-weekly) reduce total interest paid because:
-    - Interest accrues on a smaller balance more frequently
-    - You make more payments per year, reducing principal faster
-    - Bi-weekly = 26 half-payments = 13 full payments per year (1 extra payment annually)
-    """)
-
-# Educational content - FIXED VERSION (escaped curly braces)
-with st.expander("📚 Understanding Mortgage Amortization (Technical)", expanded=False):
-    st.markdown(f"""
-    ### How Amortization Works
-    
-    **Payment Formula:**
-    $$P = \\frac{{r \\times PV}}{{1 - (1 + r)^{{-n}}}}$$
-    
-    Where:
-    - P = periodic payment
-    - PV = Loan amount (${principal:,.0f})
-    - r = periodic interest rate ({annual_rate*100:.2f}% / {freq_per_year} = {(annual_rate/freq_per_year)*100:.4f}%)
-    - n = total number of payments ({years} years × {freq_per_year} = {years * freq_per_year})
-    
-    ### Your Loan Summary:
-    - **Payment:** ${total_payment:,.2f} {frequency_option.lower()}
-    - **Total Interest:** ${total_interest:,.2f}
-    - **Interest as % of Loan:** {(total_interest/principal)*100:.1f}%
-    - **Total Cost:** ${principal + total_interest:,.2f}
-    
-    ### IO/PO Strips Mathematical Formula:
-    
-    **IO Strip Value:**
-    $$IO = \\sum_{{t=1}}^{{n}} \\frac{{I_t}}{{(1+r)^t}}$$
-    
-    **PO Strip Value:**
-    $$PO = \\sum_{{t=1}}^{{n}} \\frac{{P_t}}{{(1+r)^t}}$$
-    
-    Where:
-    - I_t = Interest payment at time t
-    - P_t = Principal payment at time t
-    - r = Discount rate
-    - n = Total number of payments
-    
-    **Note:** IO Value + PO Value = Present Value of all mortgage payments
-    """)
-
-# Download option
-st.subheader("📥 Export Data")
-
-if st.button("Generate Full Amortization Schedule (CSV)"):
-    csv = schedule.to_csv(index=False)
-    st.download_button(
-        label="Download CSV",
-        data=csv,
-        file_name=f"mortgage_amortization_{principal}_{years}years.csv",
-        mime="text/csv"
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=zero_curve['Maturity'], 
+        y=zero_curve['Zero Rate (%)'],
+        mode='lines+markers',
+        name='Zero Rates',
+        line=dict(color='blue', width=3),
+        marker=dict(size=10)
+    ))
+    fig.update_layout(
+        title='Zero-Coupon Yield Curve (Bootstrapped)',
+        xaxis_title='Maturity (Years)',
+        yaxis_title='Zero Rate (%)'
     )
+    st.plotly_chart(fig, use_container_width=True)
+    
+    st.dataframe(zero_curve, use_container_width=True)
 
-st.caption(f"📊 {len(schedule)} total payments | {frequency_option} | {'With' if extra_payment > 0 else 'Without'} extra payments | IO/PO strips show prepayment risk")
+# ========== METHOD 3: NELSON-SIEGEL ==========
+else:
+    st.markdown("### Nelson-Siegel Model - Smooth Yield Curve")
+    st.caption("The Nelson-Siegel model fits a smooth mathematical curve to yield curve data")
+    
+    col_n1, col_n2 = st.columns(2)
+    
+    with col_n1:
+        st.markdown("**Model Parameters (adjust to see effect):**")
+        beta0 = st.slider("β₀ (Long-term level)", 2.0, 8.0, 4.5, 0.1)
+        beta1 = st.slider("β₁ (Short-term slope)", -4.0, 0.0, -1.5, 0.1)
+        beta2 = st.slider("β₂ (Curvature)", -2.0, 4.0, 1.0, 0.1)
+        tau = st.slider("τ (Decay factor)", 0.5, 5.0, 2.0, 0.1)
+    
+    with col_n2:
+        st.markdown("**Curve Shape Interpretation:**")
+        short_rate = beta0 + beta1
+        long_rate = beta0
+        st.info(f"""
+        - **Long-term rate:** {beta0:.2f}%
+        - **Short-term rate:** {short_rate:.2f}%
+        - **Curve shape:** {'Normal' if short_rate < long_rate else 'Inverted' if short_rate > long_rate else 'Flat'}
+        """)
+    
+    def nelson_siegel(beta0, beta1, beta2, tau, maturity):
+        lambd = maturity / tau
+        factor1 = (1 - np.exp(-lambd)) / lambd if lambd > 0 else 1
+        factor2 = ((1 - np.exp(-lambd)) / lambd) - np.exp(-lambd) if lambd > 0 else 0
+        return beta0 + beta1 * factor1 + beta2 * factor2
+    
+    maturities = np.linspace(0.1, 30, 100)
+    yields = [nelson_siegel(beta0, beta1, beta2, tau, m) for m in maturities]
+    
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=maturities, 
+        y=yields,
+        mode='lines',
+        name='Nelson-Siegel Curve',
+        line=dict(color='blue', width=3)
+    ))
+    fig.update_layout(
+        title='Nelson-Siegel Yield Curve',
+        xaxis_title='Maturity (Years)',
+        yaxis_title='Yield (%)'
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Sample yields
+    st.subheader("📊 Sample Yields")
+    sample_maturities = [0.25, 1, 2, 3, 5, 7, 10, 20, 30]
+    sample_yields = [nelson_siegel(beta0, beta1, beta2, tau, m) for m in sample_maturities]
+    
+    sample_df = pd.DataFrame({
+        'Maturity': ['3mo', '1yr', '2yr', '3yr', '5yr', '7yr', '10yr', '20yr', '30yr'],
+        'Yield (%)': [f"{y:.2f}%" for y in sample_yields]
+    })
+    st.dataframe(sample_df, use_container_width=True)
+
+# ========== INTERPRETATION SECTION ==========
+with st.expander("📖 Understanding the Yield Curve", expanded=False):
+    st.markdown("""
+    ### How to Read and Interpret the Yield Curve
+    
+    **Three Classic Shapes and What They Mean:**
+    
+    | Shape | Economic Signal | What to Do |
+    |-------|-----------------|------------|
+    | **Normal (Upward)** | Economic growth expected | Buy longer-term bonds for higher yield |
+    | **Inverted (Downward)** | Recession may be coming | Move to short-term, safe investments |
+    | **Flat** | Economic uncertainty | Stay flexible, medium-term bonds |
+    
+    ### Historical Examples:
+    - **Before 2008 Crisis:** Curve inverted in 2006 → Recession followed in 2008
+    - **2022-2023:** Curve inverted → Many predicted recession
+    
+    ### Why This Matters for Regulators:
+    - Banks use yield curve for interest rate risk management
+    - Central banks monitor curve for policy signals
+    - Inverted curve often precedes economic downturns
+    """)
+
+st.caption("📊 The term structure is fundamental to bond pricing, risk management, and monetary policy")

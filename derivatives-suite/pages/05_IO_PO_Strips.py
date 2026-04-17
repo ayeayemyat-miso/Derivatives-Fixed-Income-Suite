@@ -445,9 +445,11 @@ with st.expander("📚 Understanding Mortgage Amortization (Technical)", expande
     
     ### IO/PO Strips Mathematical Formula:
     
-    **IO Strip Value:** $$IO = \\sum_{{t=1}}^{n} \\frac{{I_t}}{{(1+r)^t}}$$
+    ### IO/PO Strips Mathematical Formula:
     
-    **PO Strip Value:** $$PO = \\sum_{{t=1}}^{n} \\frac{{P_t}}{{(1+r)^t}}$$
+    **IO Strip Value:** $$IO = \\sum_{{t=1}}^{{n}} \\frac{{I_t}}{{(1+r)^t}}$$
+
+    **PO Strip Value:** $$PO = \\sum_{{t=1}}^{{n}} \\frac{{P_t}}{{(1+r)^t}}$$
     
     Where:
     - I_t = Interest payment at time t
